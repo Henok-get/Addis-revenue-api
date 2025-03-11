@@ -1,0 +1,13 @@
+[
+    {
+      "client_id": "bank_client_1",
+      "client_secret": "secret1",
+      "scope": "Unified_Outgoing"
+    },
+    {
+      "client_id": "bank_client_2",
+      "client_secret": "secret2",
+      "scope": "Unified_Outgoing"
+    }
+  ]
+  
