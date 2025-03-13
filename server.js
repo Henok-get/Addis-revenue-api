@@ -1,101 +1,146 @@
 const express = require('express');
-const bodyParser = require('body-parser');
 const jwt = require('jsonwebtoken');
-const fs = require('fs');
-const path = require('path');
-
 const app = express();
-app.use(bodyParser.json());
 
-// Secret key for JWT signing (store securely in production)
-const JWT_SECRET = 'your_jwt_secret';
-// Token expiry time (in seconds)
-const TOKEN_EXPIRY = 3600;
+// Middleware to parse JSON bodies
+app.use(express.json());
 
-// Load the client credentials from the JSON file
-const clientsFilePath = path.join(__dirname, 'clients.json');
-let clients = [];
-try {
-  const data = fs.readFileSync(clientsFilePath, 'utf8');
-  clients = JSON.parse(data);
-} catch (error) {
-  console.error('Error reading clients.json file:', error);
-}
+// Mock client database for token-based auth (replace with real DB in production)
+const clients = [
+  {
+    client_id: 'app123',
+    client_secret: 'secret456',
+    allowed_scope: 'Unified_Outgoing', // Single allowed scope
+  },
+];
 
-// Middleware to protect routes by verifying JWT tokens
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
+// Mock user database for Basic Auth (replace with real DB in production)
+const users = [
+  { username: 'user1', password: 'pass123' },
+];
 
-  if (!token) {
-    return res.status(403).json({ error: 'Token is required' });
-  }
+// Secret key for signing JWT (store in environment variables in production)
+const JWT_SECRET = 'your_secret_key_here';
 
-  jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err) {
-      return res.status(401).json({ error: 'Invalid or expired token' });
-    }
-    req.user = decoded;
-    next();
-  });
-}
-
-// Token generation endpoint (POST /token)
+// Token endpoint (updated to use default scope "Unified_Outgoing")
 app.post('/token', (req, res) => {
-  const { grant_type, client_id, client_secret, scope } = req.body;
+  const { grant_type, client_id, client_secret, scope = 'Unified_Outgoing' } = req.body;
 
-  // Validate mandatory fields
   if (!grant_type || !client_id || !client_secret) {
     return res.status(400).json({
-      error: 'Missing required fields. grant_type, client_id, and client_secret are required.'
+      error: 'invalid_request',
+      error_description: 'Missing required fields',
     });
   }
 
-  // Enforce expected grant_type for client credentials flow
   if (grant_type !== 'client_credentials') {
     return res.status(400).json({
-      error: 'Invalid grant_type. Expected "client_credentials".'
+      error: 'unsupported_grant_type',
+      error_description: 'Only client_credentials is supported',
     });
   }
 
-  // Find matching client from the JSON file
   const client = clients.find(
     (c) => c.client_id === client_id && c.client_secret === client_secret
   );
-
   if (!client) {
-    return res.status(401).json({ error: 'Invalid client_id or client_secret' });
+    return res.status(401).json({
+      error: 'invalid_client',
+      error_description: 'Invalid client_id or client_secret',
+    });
   }
 
-  // Use provided scope or default to the one from stored client record
-  const finalScope = scope || client.scope || 'Unified_Outgoing';
+  // Validate scope (only "Unified_Outgoing" is allowed)
+  if (scope !== client.allowed_scope) {
+    return res.status(400).json({
+      error: 'invalid_scope',
+      error_description: 'Only scope "Unified_Outgoing" is allowed',
+    });
+  }
 
-  // Create token payload
-  const tokenPayload = { client_id, scope: finalScope };
+  const payload = {
+    client_id: client.client_id,
+    scope: scope, // Single scope value
+    iat: Math.floor(Date.now() / 1000),
+  };
+  const access_token = jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
 
-  // Generate the JWT token
-  const access_token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
-
-  // Respond with token details
   res.json({
     token_type: 'Bearer',
     access_token: access_token,
-    scope: finalScope,
-    expires_in: TOKEN_EXPIRY.toString(),
-    consented_on: new Date().toISOString()
+    scope: scope,
+    expires_in: '3600',
+    consented_on: Math.floor(Date.now() / 1000).toString(),
   });
 });
 
-// Protected route example (GET /protected)
-app.get('/protected', authenticateToken, (req, res) => {
+// Middleware to validate Bearer Token
+const authenticateBearer = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      error: 'unauthorized',
+      error_description: 'Bearer token missing or invalid',
+    });
+  }
+
+  const token = authHeader.split(' ')[1];
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(403).json({
+        error: 'invalid_token',
+        error_description: 'Bearer token is invalid or expired',
+      });
+    }
+    req.client = decoded;
+    next();
+  });
+};
+
+// Middleware to validate Basic Auth
+const authenticateBasic = (req, res, next) => {
+  const basicAuthHeader = req.headers['x-basic-auth']; // Custom header for Basic Auth
+
+  if (!basicAuthHeader) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Restricted Area"');
+    return res.status(401).json({
+      error: 'unauthorized',
+      error_description: 'Basic auth credentials missing',
+    });
+  }
+
+  const credentials = Buffer.from(basicAuthHeader, 'base64').toString('ascii');
+  const [username, password] = credentials.split(':');
+
+  const user = users.find(
+    (u) => u.username ===username && u.password === password
+  );
+
+  if (!user) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Restricted Area"');
+    return res.status(401).json({
+      error: 'invalid_credentials',
+      error_description: 'Invalid username or password',
+    });
+  }
+
+  req.user = user;
+  next();
+};
+
+// Protected route requiring both Bearer and Basic Auth
+app.get('/protected', authenticateBearer, authenticateBasic, (req, res) => {
   res.json({
-    message: 'Access granted to protected resource',
-    clientData: req.user
+    message: 'Access granted with both Bearer and Basic Auth',
+    client_id: req.client.client_id,
+    scope: req.client.scope, // Single scope "Unified_Outgoing"
+    username: req.user.username,
   });
 });
 
-// Start the Express server
+// Start server
 const PORT = 3000;
 app.listen(PORT, () => {
-  console.log(`Token service API running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
